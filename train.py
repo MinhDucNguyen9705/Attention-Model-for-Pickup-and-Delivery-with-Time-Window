@@ -1,186 +1,138 @@
+import argparse
 import os
-import time
-from tqdm import tqdm
+from tensorboard_logger import Logger as TbLogger
 import torch
-import math
+from model import AttentionModel
+from environment import CPDPTW
+from baseline import RolloutBaseline
+import torch.optim as optim
+from utils.train_utils import train_epoch, validate
+from utils.validation import validate_file, convert_solution
 
-from torch.utils.data import DataLoader
-from torch.nn import DataParallel
+def get_options():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--problem', default='cvrp', help="The problem to solve, default 'cvrp'")
+    parser.add_argument('--graph_size', type=int, default=100, help="The size of the problem graph")
+    parser.add_argument('--batch_size', type=int, default=512, help='Number of instances per batch during training')
+    parser.add_argument('--epoch_size', type=int, default=1280000, help='Number of instances per epoch during training')
+    parser.add_argument('--val_size', type=int, default=10000,
+                        help='Number of instances used for reporting validation performance')
+    parser.add_argument('--val_dataset', type=str, default=None, help='Dataset file to use for validation')
+    parser.add_argument('--data_path', type=str, default=None, help='Path to data file to use for training')
+    # Model
+    parser.add_argument('--model', default='attention', help="Model, 'attention' (default) or 'pointer'")
+    parser.add_argument('--embedding_dim', type=int, default=128, help='Dimension of input embedding')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Dimension of hidden layers in Enc/Dec')
+    parser.add_argument('--n_encode_layers', type=int, default=3,
+                        help='Number of layers in the encoder/critic network')
+    parser.add_argument('--tanh_clipping', type=float, default=10.,
+                        help='Clip the parameters to within +- this value using tanh. '
+                                'Set to 0 to not perform any clipping.')
+    parser.add_argument('--normalization', default='batch', help="Normalization type, 'batch' (default) or 'instance'")
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers')
+    # Training
+    parser.add_argument('--lr_model', type=float, default=1e-4, help="Set the learning rate for the actor network")
+    parser.add_argument('--lr_critic', type=float, default=1e-4, help="Set the learning rate for the critic network")
+    parser.add_argument('--lr_decay', type=float, default=1.0, help='Learning rate decay per epoch')
+    parser.add_argument('--eval_only', action='store_true', help='Set this value to only evaluate model')
+    parser.add_argument('--n_epochs', type=int, default=10, help='The number of epochs to train')
+    parser.add_argument('--seed', type=int, default=1234, help='Random seed to use')
+    parser.add_argument('--max_grad_norm', type=float, default=1.0,
+                        help='Maximum L2 norm for gradient clipping, default 1.0 (0 to disable clipping)')
+    parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
+    parser.add_argument('--exp_beta', type=float, default=0.8,
+                        help='Exponential moving average baseline decay (default 0.8)')
+    parser.add_argument('--baseline', default=None,
+                        help="Baseline to use: 'rollout', 'critic' or 'exponential'. Defaults to no baseline.")
+    parser.add_argument('--bl_alpha', type=float, default=0.05,
+                        help='Significance in the t-test for updating rollout baseline')
+    parser.add_argument('--bl_warmup_epochs', type=int, default=None,
+                        help='Number of epochs to warmup the baseline, default None means 1 for rollout (exponential '
+                                'used for warmup phase), 0 otherwise. Can only be used with rollout baseline.')
+    parser.add_argument('--eval_batch_size', type=int, default=1024,
+                        help="Batch size to use during (baseline) evaluation")
+    parser.add_argument('--checkpoint_encoder', action='store_true',
+                        help='Set to decrease memory usage by checkpointing encoder')
+    parser.add_argument('--shrink_size', type=int, default=None,
+                        help='Shrink the batch size if at least this many instances in the batch are finished'
+                                ' to save memory (default None means no shrinking)')
+    parser.add_argument('--data_distribution', type=str, default=None,
+                        help='Data distribution to use during training, defaults and options depend on problem.')
 
-def set_decode_type(model, decode_type):
-    if isinstance(model, DataParallel):
-        model = model.module
-    model.set_decode_type(decode_type)
+    # Misc
+    parser.add_argument('--log_step', type=int, default=50, help='Log info every log_step steps')
+    parser.add_argument('--log_dir', default='logs', help='Directory to write TensorBoard information to')
+    parser.add_argument('--run_name', default='run', help='Name to identify the run')
+    parser.add_argument('--output_dir', default='outputs', help='Directory to write output models to')
+    parser.add_argument('--epoch_start', type=int, default=0,
+                        help='Start at epoch # (relevant for learning rate decay)')
+    parser.add_argument('--checkpoint_epochs', type=int, default=1,
+                        help='Save checkpoint every n epochs (default 1), 0 to save no checkpoints')
+    parser.add_argument('--load_path', help='Path to load model parameters and optimizer state from')
+    parser.add_argument('--resume', help='Resume from previous checkpoint file')
+    parser.add_argument('--no_tensorboard', action='store_true', help='Disable logging TensorBoard files')
+    parser.add_argument('--no_progress_bar', action='store_true', help='Disable progress bar')
 
-def get_inner_model(model):
-    return model.module if isinstance(model, DataParallel) else model
+    opts, unknown = parser.parse_known_args()
+    if len(unknown) > 0:
+        print("Unknown args:", unknown)
+    return opts
 
-def validate(model, dataset, opts):
-    # Validate
-    print('Validating...')
-    cost = rollout(model, dataset, opts)
-    avg_cost = cost.mean()
-    print('Validation overall avg_cost: {} +- {}'.format(
-        avg_cost, torch.std(cost) / math.sqrt(len(cost))))
+if __name__ == "__main__":
+    opts = get_options()
+    opts.save_dir = os.path.join(
+        opts.output_dir,
+        "{}_{}".format(opts.problem, opts.graph_size),
+        opts.run_name
+    )
+    if not os.path.exists(opts.save_dir):
+        os.makedirs(opts.save_dir)
 
-    return avg_cost
-
-def move_to(var, device):
-    if isinstance(var, dict):
-        return {k: move_to(v, device) for k, v in var.items()}
-    return var.to(device)
-
-def rollout(model, dataset, opts):
-    # Put in greedy evaluation mode!
-    set_decode_type(model, "greedy")
-    model.eval()
-
-    def eval_model_bat(bat):
-        with torch.no_grad():
-            cost, _ = model(move_to(bat, opts.device))
-        return cost.data.cpu()
-
-    return torch.cat([
-        eval_model_bat(bat)
-        for bat
-        in tqdm(DataLoader(dataset, batch_size=opts.eval_batch_size), disable=opts.no_progress_bar)
-    ], 0)
-
-def clip_grad_norms(param_groups, max_norm=math.inf):
-    """
-    Clips the norms for all param groups to max_norm and returns gradient norms before clipping
-    :param optimizer:
-    :param max_norm:
-    :param gradient_norms_log:
-    :return: grad_norms, clipped_grad_norms: list with (clipped) gradient norms per group
-    """
-    grad_norms = [
-        torch.nn.utils.clip_grad_norm_(
-            group['params'],
-            max_norm if max_norm > 0 else math.inf,  # Inf so no clipping but still call to calc
-            norm_type=2
-        )
-        for group in param_groups
-    ]
-    grad_norms_clipped = [min(g_norm, max_norm) for g_norm in grad_norms] if max_norm > 0 else grad_norms
-    return grad_norms, grad_norms_clipped
-
-def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, problem, tb_logger, opts):
-    print("Start train epoch {}, lr={} for run {}".format(epoch, optimizer.param_groups[0]['lr'], opts.run_name))
-    step = epoch * (opts.epoch_size // opts.batch_size)
-    start_time = time.time()
-
+    tb_logger = None
     if not opts.no_tensorboard:
-        tb_logger.log_value('learnrate_pg0', optimizer.param_groups[0]['lr'], step)
+        tb_logger = TbLogger(os.path.join(opts.log_dir, "{}_{}".format(opts.problem, opts.graph_size), opts.run_name))
+    
+    opts.data_path = 'D:/OneDrive - Hanoi University of Science and Technology/Projects/Project 1/Data/Sartori&Buriol/Instances/n100'
+    opts.device = torch.device("cuda" if not opts.no_cuda and torch.cuda.is_available() else "cpu")
 
-    # Generate new training data for each epoch
-    training_dataset = baseline.wrap_dataset(problem.make_dataset(opts.data_path))
-    training_dataloader = DataLoader(training_dataset, batch_size=opts.batch_size, num_workers=opts.num_workers)
+    problem = CPDPTW()
+    model = AttentionModel(
+        embed_dim=128,
+        hidden_dim=128,
+        problem=problem,
+        n_encode_layers=3,
+        tanh_clipping=10.,
+        mask_inner=True,
+        mask_logits=True,
+        normalization='batch',
+        n_heads=8,
+        checkpoint_encoder=False,
+        shrink_size=None
+    ).to(opts.device)
+    baseline = RolloutBaseline(model, problem, opts)
 
-    # Put model in train mode!
-    model.train()
-    set_decode_type(model, "sampling")
-
-    for batch_id, batch in enumerate(tqdm(training_dataloader, disable=opts.no_progress_bar)):
-        train_batch(
-            model,
-            optimizer,
-            baseline,
-            epoch,
-            batch_id,
-            step,
-            batch,
-            tb_logger,
-            opts
+    optimizer = optim.Adam(
+            [{'params': model.parameters(), 'lr': opts.lr_model}]
+            + (
+                [{'params': baseline.get_learnable_parameters(), 'lr': opts.lr_critic}]
+                if len(baseline.get_learnable_parameters()) > 0
+                else []
+            )
         )
-
-        step += 1
-
-    epoch_duration = time.time() - start_time
-    print("Finished epoch {}, took {} s".format(epoch, time.strftime('%H:%M:%S', time.gmtime(epoch_duration))))
-
-    if (opts.checkpoint_epochs != 0 and epoch % opts.checkpoint_epochs == 0) or epoch == opts.n_epochs - 1:
-        print('Saving model and state...')
-        torch.save(
-            {
-                'model': get_inner_model(model).state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'rng_state': torch.get_rng_state(),
-                'cuda_rng_state': torch.cuda.get_rng_state_all(),
-                'baseline': baseline.state_dict()
-            },
-            os.path.join(opts.save_dir, 'epoch-{}.pt'.format(epoch))
-        )
-
-    avg_reward = validate(model, val_dataset, opts)
-
-    if not opts.no_tensorboard:
-        tb_logger.log_value('val_avg_reward', avg_reward, step)
-
-    baseline.epoch_callback(model, epoch)
-
-    # lr_scheduler should be called at end of epoch
-    lr_scheduler.step()
-
-def log_values(cost, grad_norms, epoch, batch_id, step,
-               log_likelihood, reinforce_loss, bl_loss, tb_logger, opts):
-    avg_cost = cost.mean().item()
-    grad_norms, grad_norms_clipped = grad_norms
-
-    # Log values to screen
-    print('epoch: {}, train_batch_id: {}, avg_cost: {}'.format(epoch, batch_id, avg_cost))
-
-    print('grad_norm: {}, clipped: {}'.format(grad_norms[0], grad_norms_clipped[0]))
-
-    # Log values to tensorboard
-    if not opts.no_tensorboard:
-        tb_logger.log_value('avg_cost', avg_cost, step)
-
-        tb_logger.log_value('actor_loss', reinforce_loss.item(), step)
-        tb_logger.log_value('nll', -log_likelihood.mean().item(), step)
-
-        tb_logger.log_value('grad_norm', grad_norms[0], step)
-        tb_logger.log_value('grad_norm_clipped', grad_norms_clipped[0], step)
-
-        if opts.baseline == 'critic':
-            tb_logger.log_value('critic_loss', bl_loss.item(), step)
-            tb_logger.log_value('critic_grad_norm', grad_norms[1], step)
-            tb_logger.log_value('critic_grad_norm_clipped', grad_norms_clipped[1], step)
-
-
-def train_batch(
-        model,
-        optimizer,
-        baseline,
-        epoch,
-        batch_id,
-        step,
-        batch,
-        tb_logger,
-        opts
-):
-    x, bl_val = baseline.unwrap_batch(batch)
-    x = move_to(x, opts.device)
-    bl_val = move_to(bl_val, opts.device) if bl_val is not None else None
-
-    # Evaluate model, get costs and log probabilities
-    cost, log_likelihood = model(x)
-
-    # Evaluate baseline, get baseline loss if any (only for critic)
-    bl_val, bl_loss = baseline.eval(x, cost) if bl_val is None else (bl_val, 0)
-
-    # Calculate loss
-    reinforce_loss = ((cost - bl_val) * log_likelihood).mean()
-    loss = reinforce_loss + bl_loss
-
-    # Perform backward pass and optimization step
-    optimizer.zero_grad()
-    loss.backward()
-    # Clip gradient norms and get (clipped) gradient norms for logging
-    grad_norms = clip_grad_norms(optimizer.param_groups, opts.max_grad_norm)
-    optimizer.step()
-
-    # Logging
-    if step % int(opts.log_step) == 0:
-        log_values(cost, grad_norms, epoch, batch_id, step,
-                   log_likelihood, reinforce_loss, bl_loss, tb_logger, opts)
+    lr_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: opts.lr_decay ** epoch)
+    val_dataset = problem.make_dataset(opts.data_path)
+    if opts.eval_only:
+        validate(model, val_dataset, opts)
+    else:
+        for epoch in range(opts.epoch_start, opts.epoch_start + opts.n_epochs):
+            train_epoch(
+                model,
+                optimizer,
+                baseline,
+                lr_scheduler,
+                epoch,
+                val_dataset,
+                problem,
+                tb_logger,
+                opts
+            )
