@@ -26,6 +26,7 @@ def get_options():
                                 'Set to 0 to not perform any clipping.')
     parser.add_argument('--normalization', default='batch', help="Normalization type, 'batch' (default) or 'instance'")
     parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to the model checkpoint')
 
     opts, unknown = parser.parse_known_args()
     if len(unknown) > 0:
@@ -34,9 +35,10 @@ def get_options():
 
 if __name__ == "__main__":
     opts = get_options()
-    data_path = opts.data_path
-    dataset = CPDPTWDataset(data_path)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=25, shuffle=False)
+    opts.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    dataset = CPDPTWDataset(opts.data_path)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=opts.batch_size, shuffle=False)
     batch = next(iter(dataloader))
     problem = CPDPTW()
 
@@ -52,8 +54,11 @@ if __name__ == "__main__":
         n_heads=8,
         checkpoint_encoder=False,
         shrink_size=None
-    ).to(opts.device)
+    )
 
+    state_dict = torch.load(opts.model_path, map_location=torch.device('cpu'))
+    model.load_state_dict(state_dict['model'])
+    model.to(opts.device)
     # Run the model
     model.eval()
     model.set_decode_type('greedy')
@@ -61,7 +66,7 @@ if __name__ == "__main__":
         length, log_p, pi = model(batch, return_pi=True)
     tours = pi
 
-    file_paths = glob.glob(os.path.join(data_path, '*.txt'))
+    file_paths = glob.glob(os.path.join(opts.data_path, '*.txt'))
 
     for i, (data, tour) in enumerate(zip(dataset, tours)):
         fig, ax = plt.subplots(figsize=(10, 10))
