@@ -39,8 +39,7 @@ class Instance:
 			## Read NODES section
 			for x in range(0, self.size):
 				line = f.readline()
-				fields = line.split(" ")
-				
+				fields = line.split()
 				node = Node()
 				node.idx = int(fields[0])
 				## ignoring latitude and longitude fields
@@ -51,10 +50,11 @@ class Instance:
 				
 				## a node's pair is always ID+(Size/2)
 				if node.dem > 0:
-					node.pair = node.idx+int(math.floor(self.size/2))
+					# node.pair = node.idx+int(math.floor(self.size/2))
+					node.pair = int(fields[8])
 				elif node.dem < 0:
-					node.pair = node.idx-int(math.floor(self.size/2))
-					
+					# node.pair = node.idx-int(math.floor(self.size/2))
+					node.pair = int(fields[7])
 				self.nodes.append(node)
 
 			## read EDGES section, which comes right after NODES
@@ -67,7 +67,6 @@ class Instance:
 				for y in fields:
 					self.times[-1].append(int(y))
 
-					
 class Solution:
 	def __init__(self, routes):
 		self.inst_name = ""
@@ -75,70 +74,97 @@ class Solution:
 		self.routes = routes
 
 def validate_solution(inst, sol):
-    visited = [0 for x in range(0,inst.size)]
-    
-    ## default initial values
-    result = True
-    cost = 0
-    message = "Valid"
-    
-    for r in sol.routes:
-        time = 0
-        load = 0
-        n = 0
-                
-        for a in r[1:]:
-            if a != 0 and visited[a] == 1:
-                message = "Node %d visited twice" % (a)
-                result = False
-                break
-            
-            time += inst.times[n][a]
-            time = max(time, inst.nodes[a].etw)
-            # print(inst.nodes[a].dem)
-            # print(visited)
-            if time > inst.nodes[a].ltw: ## above maximum time limit of TW
-                message = "Visit after time window limit at %d: %d > %d" % (a, time, inst.nodes[a].ltw)
-                result = False
-                break
-            if inst.nodes[a].dem < 0 and visited[inst.nodes[a].pair] == 0: ## trying to deliver before pickup
-                message = "Delivery before pickup for pair (%d,%d)" % (inst.nodes[a].pair, a)
-                result = False
-                break
-            
-            load += inst.nodes[a].dem
-            if load > inst.capacity: ## out of vehicle capacity limits
-                message = "Vehicle overloaded at %d: %d > %d" % (a, load, inst.capacity)
-                result = False
-                break
-    
-            ## update basic values
-            time += inst.nodes[a].dur
-            cost += inst.times[n][a]
-            n = a
-            visited[a] = 1
-    
-        if not result:
-            break
-        
-    ## check if all locations were visited
-    if result and sum(visited) < inst.size:
-        missing = list()
-        for a in range(1,len(inst.nodes)):
-            if visited[a] == 0:
-                missing.append(a)
-                
-        message = "Nodes were not visited (%d out of %d): %s" % (inst.size - sum(visited), inst.size, str(missing))
-        result = False
-    
-    return [result, message,  len(sol.routes), cost]
+	visited = [0 for x in range(0,inst.size)]
+
+	## default initial values
+	result = True
+	cost = 0
+	message = "Valid"
+	all_capacity = []
+	wait_times = []
+
+	for r in sol.routes:
+		time = 0
+		load = 0
+		n = 0
+		wait_time = 0
+		max_load = 0
+				
+		for a in r[1:]:
+			if a != 0 and visited[a] == 1:
+				message = "Node %d visited twice" % (a)
+				result = False
+				break
+			
+			time += inst.times[n][a]
+			wait_time += max(0, inst.nodes[a].etw - time)
+			time = max(time, inst.nodes[a].etw)
+
+			if time > inst.nodes[a].ltw: ## above maximum time limit of TW
+				message = "Visit after time window limit at %d: %d > %d" % (a, time, inst.nodes[a].ltw)
+				result = False
+				break
+			if inst.nodes[a].dem < 0 and visited[inst.nodes[a].pair] == 0: ## trying to deliver before pickup
+				message = "Delivery before pickup for pair (%d,%d)" % (inst.nodes[a].pair, a)
+				result = False
+				break
+			
+			load += inst.nodes[a].dem
+			# print(load)
+			if load > inst.capacity: ## out of vehicle capacity limits
+				message = "Vehicle overloaded at %d: %d > %d" % (a, load, inst.capacity)
+				result = False
+				break
+
+			## update basic values
+			max_load = max(max_load, load)
+			time += inst.nodes[a].dur
+			cost += inst.times[n][a]
+			n = a
+			visited[a] = 1
+
+		if not result:
+			break
+		all_capacity.append(max_load)
+		wait_times.append(wait_time)
+		
+	## check if all locations were visited
+	if result and sum(visited) < inst.size:
+		missing = list()
+		for a in range(1,len(inst.nodes)):
+			if visited[a] == 0:
+				missing.append(a)
+				
+		message = "Nodes were not visited (%d out of %d): %s" % (inst.size - sum(visited), inst.size, str(missing))
+		result = False
+
+	mean_percent_capacity = sum(all_capacity)/(len(all_capacity) * inst.capacity) if len(all_capacity) > 0 else 0
+	std_percent_capacity = (sum([(x/(inst.capacity) - mean_percent_capacity)**2 for x in all_capacity])/len(all_capacity))**0.5 if len(all_capacity) > 0 else 0
+	mean_wait = sum(wait_times)/len(wait_times) if len(wait_times) > 0 else 0
+	std_wait = (sum([(x - mean_wait)**2 for x in wait_times])/len(wait_times))**0.5 if len(wait_times) > 0 else 0
+	
+	return [result, message,  len(sol.routes), cost, mean_percent_capacity, std_percent_capacity, mean_wait, std_wait]
 
 def validate_file(inst_path, routes):
 	inst = Instance()
 	inst.read_from_file(inst_path)
 	sol = Solution(routes)
 
-	return validate_solution(inst, sol)
+	return [inst_path] + validate_solution(inst, sol)
+
+def log_results(results):
+	with open("logs/validation_log.txt", "a") as f:
+		f.write("Instance: %s\n" % results[0].replace("\\", "/").split("/")[-1])
+		f.write("Result: %s\n" % ("Valid" if results[1] else "Invalid"))
+		f.write("Message: %s\n" % results[2])
+		if results[1]:
+			f.write("Number of Routes: %d\n" % results[3])
+			f.write("Total Cost: %d\n" % results[4])
+			f.write("Mean Capacity Used: %.2f%%\n" % (results[5]*100))
+			f.write("Std Dev Capacity Used: %.2f%%\n" % (results[6]*100))
+			f.write("Mean Wait Time: %.2f\n" % results[7])
+			f.write("Std Dev Wait Time: %.2f\n" % results[8])
+		f.write("\n")
 
 def convert_solution(route):
     routes = [r[r!=0].tolist() for r in np.split(route.cpu().numpy(), np.where(route==0)[0]) if (r != 0).any()]

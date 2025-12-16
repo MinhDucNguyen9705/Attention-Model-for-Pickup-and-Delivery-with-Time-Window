@@ -19,7 +19,7 @@ def get_options():
     parser.add_argument('--model', default='attention', help="Model, 'attention' (default) or 'pointer'")
     parser.add_argument('--embedding_dim', type=int, default=128, help='Dimension of input embedding')
     parser.add_argument('--hidden_dim', type=int, default=128, help='Dimension of hidden layers in Enc/Dec')
-    parser.add_argument('--n_encode_layers', type=int, default=3,
+    parser.add_argument('--n_encode_layers', type=int, default=5,
                         help='Number of layers in the encoder/critic network')
     parser.add_argument('--tanh_clipping', type=float, default=10.,
                         help='Clip the parameters to within +- this value using tanh. '
@@ -56,7 +56,7 @@ if __name__ == "__main__":
         shrink_size=None
     )
 
-    state_dict = torch.load(opts.model_path, map_location=torch.device('cpu'))
+    state_dict = torch.load(opts.model_path, map_location=torch.device('cpu'), weights_only=False)
     model.load_state_dict(state_dict['model'])
     model.to(opts.device)
     # Run the model
