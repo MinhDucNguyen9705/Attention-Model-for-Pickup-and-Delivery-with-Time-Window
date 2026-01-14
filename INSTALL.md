@@ -13,7 +13,7 @@ cd Attention-Model-for-Pickup-and-Delivery-with-Time-Window
 2. Make conda environment (optional but recommended):
 
 ```powershell
-conda create -n attention-pd python=3.10 -y
+conda create -n attention-pd python=3.12 -y
 conda activate attention-pd
 ```
 

@@ -18,7 +18,7 @@ def get_options():
     parser.add_argument('--val_size', type=int, default=10000,
                         help='Number of instances used for reporting validation performance')
     parser.add_argument('--val_dataset', type=str, default=None, help='Dataset file to use for validation')
-    parser.add_argument('--data_path', type=str, default=None, help='Path to data file to use for training')
+    parser.add_argument('--data_path', type=str, default=None, help='Path to data file to use for training', required=True)
     # Model
     parser.add_argument('--model', default='attention', help="Model, 'attention' (default) or 'pointer'")
     parser.add_argument('--embedding_dim', type=int, default=128, help='Dimension of input embedding')
@@ -29,6 +29,7 @@ def get_options():
                         help='Clip the parameters to within +- this value using tanh. '
                                 'Set to 0 to not perform any clipping.')
     parser.add_argument('--normalization', default='batch', help="Normalization type, 'batch' (default) or 'instance'")
+    parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers')
     # Training
     parser.add_argument('--lr_model', type=float, default=1e-4, help="Set the learning rate for the actor network")
@@ -63,7 +64,7 @@ def get_options():
     parser.add_argument('--log_step', type=int, default=50, help='Log info every log_step steps')
     parser.add_argument('--log_dir', default='logs', help='Directory to write TensorBoard information to')
     parser.add_argument('--run_name', default='run', help='Name to identify the run')
-    parser.add_argument('--output_dir', default='outputs', help='Directory to write output models to')
+    parser.add_argument('--output_dir', default='weights', help='Directory to write output models to')
     parser.add_argument('--epoch_start', type=int, default=0,
                         help='Start at epoch # (relevant for learning rate decay)')
     parser.add_argument('--checkpoint_epochs', type=int, default=1,
@@ -92,22 +93,21 @@ if __name__ == "__main__":
     if not opts.no_tensorboard:
         tb_logger = TbLogger(os.path.join(opts.log_dir, "{}_{}".format(opts.problem, opts.graph_size), opts.run_name))
     
-    opts.data_path = 'D:/OneDrive - Hanoi University of Science and Technology/Projects/Project 1/Data/Sartori&Buriol/Instances/n100'
     opts.device = torch.device("cuda" if not opts.no_cuda and torch.cuda.is_available() else "cpu")
 
     problem = CPDPTW()
     model = AttentionModel(
-        embed_dim=128,
-        hidden_dim=128,
+        embed_dim=opts.embedding_dim,
+        hidden_dim=opts.hidden_dim,
         problem=problem,
-        n_encode_layers=3,
-        tanh_clipping=10.,
+        n_encode_layers=opts.n_encode_layers,
+        tanh_clipping=opts.tanh_clipping,
         mask_inner=True,
         mask_logits=True,
-        normalization='batch',
-        n_heads=8,
-        checkpoint_encoder=False,
-        shrink_size=None
+        normalization=opts.normalization,
+        n_heads=opts.n_heads,
+        checkpoint_encoder=opts.checkpoint_encoder,
+        shrink_size=opts.shrink_size
     ).to(opts.device)
     baseline = RolloutBaseline(model, problem, opts)
 

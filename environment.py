@@ -234,8 +234,7 @@ class StateCPDPTW(NamedTuple):
         return self.prev_a
 
     def get_mask(self):
-
-        device = self.coords.device
+        device = self.demand.device
 
         if self.visited_.dtype == torch.uint8:
             visited_loc = self.visited_[:, :, 1:]
@@ -259,12 +258,12 @@ class StateCPDPTW(NamedTuple):
         # delivery_unvisited = curr_visited_loc.squeeze(1)[delivery_mask]
         # print('Delivery Unvisited: ', delivery_unvisited)
 
-        paired_pickup_unv = torch.gather(curr_visited_loc.squeeze(1), dim=1, index=pairs-1).to(delivery_mask.dtype)
+        paired_pickup_unv = torch.gather(curr_visited_loc.squeeze(1), dim=1, index=pairs-1).to(delivery_mask.dtype).to(device)
         # print('Paired Pickup Unvisited: ', paired_pickup_unv)
         # new_delivery_mask = delivery_mask ^ paired_pickup_unv
         # print((delivery_mask & (~paired_pickup_unv)).unsqueeze(1))
         # new_delivery_mask = new_delivery_mask.unsqueeze(1)
-        new_delivery_mask = (delivery_mask & (~paired_pickup_unv)).unsqueeze(1)
+        new_delivery_mask = (delivery_mask & (~paired_pickup_unv)).unsqueeze(1).to(device)
         # print('Updated Delivery Mask: ', new_delivery_mask.to(delivery_mask.dtype), new_delivery_mask.shape)
         # print('Mask Loc before update: ', mask_loc)
         # print('Visited_loc shape: ', visited_loc.shape)
@@ -284,8 +283,9 @@ class StateCPDPTW(NamedTuple):
         arrival_to_v = self.current_time[:, None, :] + travel_time_to_v             # [B,1,Np1]
         # print('self.current_time shape: ', self.current_time.shape)
         # print('travel_time_to_v shape: ', travel_time_to_v.shape)
-        a_v = self.tw[self.ids, torch.arange(n_loc+1), 0][..., None, :]  # [B,1,Np1]
-        b_v = self.tw[self.ids, torch.arange(n_loc+1), 1][..., None, :]  # [B,1,Np1]
+        idx_all_tmp = torch.arange(n_loc + 1, device=device)
+        a_v = self.tw[self.ids, idx_all_tmp, 0][..., None, :]  # [B,1,Np1]
+        b_v = self.tw[self.ids, idx_all_tmp, 1][..., None, :]  # [B,1,Np1]
 
         arrive_ok = (arrival_to_v <= b_v)                               # [B,1,Np1]
         # print('arrival_to_v shape: ', arrival_to_v.shape)
@@ -304,8 +304,8 @@ class StateCPDPTW(NamedTuple):
         has_valid_d = (d_of_v > 0) & is_v_pickup                             # [B,Np1]
 
         # Build per-(b,v) indexing to get t(v->d), a_d, b_d, service_d
-        bf = torch.arange(batch_size)[:, None].expand(batch_size, n_loc + 1)          # [B,Np1]
-        v_idx = torch.arange(n_loc+1)[None, :].expand(batch_size, n_loc + 1)                              # [B,Np1]
+        bf = torch.arange(batch_size, device=device)[:, None].expand(batch_size, n_loc + 1)          # [B,Np1]
+        v_idx = torch.arange(n_loc+1, device=device)[None, :].expand(batch_size, n_loc + 1)                              # [B,Np1]
         d_idx = d_of_v.clamp(min=0)                                          # [B,Np1]
 
         t_v_d = self.tmat[bf, v_idx, d_idx]                                       # [B,Np1]
@@ -315,6 +315,10 @@ class StateCPDPTW(NamedTuple):
 
         arrival_d = time_after_v.squeeze(1) + t_v_d                          # [B,Np1]
         begin_d = torch.maximum(arrival_d, a_d)                              # [B,Np1]
+        # print('begin d', begin_d, begin_d.shape)
+        # print('b d', b_d, b_d.shape)
+        begin_d_ok = ((begin_d <= b_d) & has_valid_d) | ~has_valid_d           # [B,Np1]
+        # print('Begin D OK: ', begin_d_ok, begin_d_ok.shape)
         complete_d = begin_d + service_d                                     # [B,Np1]
         # print('arrival_d shape: ', arrival_d.shape)
         # print('a_d shape: ', a_d.shape)
@@ -339,7 +343,7 @@ class StateCPDPTW(NamedTuple):
         visited = visited_full[:, :, 1:]                                     # [B,1,N]
         curr_vis = curr_vis_full[:, :, 1:]                                   # [B,1,N]
 
-        is_del_full = (self.role == -1).to(device)                                           # [B,Np1]
+        is_del_full = (self.role == -1)                                           # [B,Np1]
         is_del = is_del_full[:, 1:]                                          # [B,N]
         not_visited = ~visited                                               # [B,1,N]
         pairs_non_depot = self.pair[:, 1:]                                        # [B,N]
@@ -349,22 +353,27 @@ class StateCPDPTW(NamedTuple):
         open_after_v = open_del_before.unsqueeze(1).expand(batch_size, n_loc+1, n_loc).clone() # [B,Np1,N]
 
         # remove delivery j if v == j and v is a delivery
-        idx_all = torch.arange(n_loc+1).to(device)
-        idx_1_to_N = torch.arange(1, n_loc+1).to(device)
+        idx_all = torch.arange(n_loc+1, device=device)
+        idx_1_to_N = torch.arange(1, n_loc+1, device=device)
         v_eq_j_mask = (idx_1_to_N.unsqueeze(0).unsqueeze(0) == idx_all.unsqueeze(0).unsqueeze(2))  # [1,Np1,N]
-        remove_mask = v_eq_j_mask.to(device) & is_del_full.unsqueeze(-1).to(device)                # [B,Np1,N]
-        open_after_v = open_after_v.to(device) & (~remove_mask).to(device)
-        post_node = torch.where(has_valid_d.to(device), d_of_v.to(device), idx_all.to(device)).to(device)
+        remove_mask = v_eq_j_mask & is_del_full.unsqueeze(-1)                # [B,Np1,N]
+        open_after_v = open_after_v & (~remove_mask)
+        post_node = torch.where(has_valid_d, d_of_v, idx_all)
 
         # add paired delivery of v if v is pickup
-        one_hot_j = torch.zeros(batch_size, n_loc+1, n_loc, dtype=torch.bool).to(device)
+        one_hot_j = torch.zeros(batch_size, n_loc+1, n_loc, dtype=torch.bool, device=device)
         for b in range(batch_size):
-            vs = torch.nonzero(has_valid_d[b], as_tuple=False).squeeze(-1).to(device)
+            vs = torch.nonzero(has_valid_d[b], as_tuple=False).squeeze(-1)
             if vs.numel() > 0:
                 js = (d_of_v[b, vs] - 1).clamp(min=0)
                 one_hot_j[b, vs, js] = True
-        open_after_v = open_after_v.to(device) | one_hot_j.to(device)
-        # print('Open after v', open_after_v[:, 0, :], open_after_v.shape)
+        open_after_v = open_after_v | one_hot_j
+        # print('Open after v', open_after_v[:, 5, :], open_after_v.shape)
+        # print('Has valid d: ', has_valid_d, has_valid_d.shape)
+        if has_valid_d.any():
+            hot = torch.zeros_like(open_after_v)
+            hot.scatter_(-1, (d_of_v[:, :, None]-1).clamp(min=0), True)
+            open_after_v = open_after_v & (~hot)
 
         # print(idx_all.shape, idx_1_to_N.shape)
         B = len(self.ids)
@@ -376,14 +385,14 @@ class StateCPDPTW(NamedTuple):
         # to_idx    = idx_1_to_N[None, None, :].expand(B, N_all, N_1_to_N)
         # print(batch_idx.shape, from_idx.shape, to_idx.shape)
         # t_from_v_to_j = self.tmat[batch_idx, from_idx, to_idx]
-        t_from_post_to_all = self.tmat[self.ids.expand(B, n_loc+1), post_node, :].to(device)
-        t_from_v_to_j = t_from_post_to_all[:, :, 1:].to(device)
+        t_from_post_to_all = self.tmat[self.ids.expand(B, n_loc+1), post_node, :]
+        t_from_v_to_j = t_from_post_to_all[:, :, 1:]
         # print('T from V to J: ', t_from_v_to_j[:, 0, :], t_from_v_to_j.shape)
         # print('T from V to J: ', t_from_v_to_j[:, 19, :], t_from_v_to_j.shape)
         # t_from_v_to_j = self.tmat[self.ids, idx_all[None, :, None], idx_1_to_N[None, None, :]]
 
-        a_j = self.tw[self.ids, idx_1_to_N, 0][:, None, :].to(device)                   # [B,1,N]
-        b_j = self.tw[self.ids, idx_1_to_N, 1][:, None, :].to(device)                   # [B,1,N]
+        a_j = self.tw[self.ids, idx_1_to_N, 0][:, None, :]                   # [B,1,N]
+        b_j = self.tw[self.ids, idx_1_to_N, 1][:, None, :]                   # [B,1,N]
         # service_j = self.service[self.ids, idx_1_to_N][:, None, :]
 
         # arrival to j and begin_service_j considering earliest time
@@ -395,19 +404,21 @@ class StateCPDPTW(NamedTuple):
         # print('a_j shape: ', a_j.shape, a_j[:, None, :].shape)
         begin_vj = torch.maximum(arrival_vj, a_j)           # [B,Np1,N]
         # print('Begin VJ: ', begin_vj[:, 0, :], begin_vj.shape)
-        # print('Begin VJ: ', begin_vj[:, 19, :], begin_vj[:, 19, :].shape)
+        # print('Begin VJ: ', begin_vj[:, 49, :], begin_vj[:, 49, :].shape)
         # print('b_j shape: ', b_j, b_j.shape)
         # print(self.tw[self.ids, :, 1])
 
         # Feasible if we can START by b_j (standard PDPTW: b is latest start)
         feas_open_after = (begin_vj <= b_j)                 # [B,Np1,N]
         # print('Feas Open After: ', feas_open_after[:, 0, :], feas_open_after.shape)
-        # print('Feas Open After: ', feas_open_after[:, 19, :], feas_open_after.shape)
+        # print('Feas Open After: ', feas_open_after[:, 49, :], feas_open_after.shape)
         all_open_ok = torch.where(open_after_v, feas_open_after, torch.ones_like(feas_open_after)).all(dim=-1, keepdim=True)  # [B,Np1,1]
-
+        # all_open_ok = torch.where(open_after_v, feas_open_after, torch.ones_like(feas_open_after)).any(dim=-1, keepdim=True) 
+        
         # Local feasibility at v: arrival_to_v must be ≤ b_v as usual
-        tw_ok_v = (arrival_to_v <= b_v) & all_open_ok.transpose(1, 2)
-        # print('arrival to v <= b_v: ',(arrival_to_v <= b_v))
+        tw_ok_v = (arrive_ok) & all_open_ok.transpose(1, 2) & (begin_d_ok[:, None, :])  # [B,1,Np1]
+        # print('begin_d_ok: ', begin_d_ok, begin_d_ok.shape)
+        # print('arrive_ok: ',(arrive_ok))
         # print('all open ok: ', all_open_ok.transpose(1, 2), all_open_ok.transpose(1, 2).shape)
         # print('TW OK V before depot check: ', tw_ok_v, tw_ok_v.shape)
 
@@ -461,12 +472,16 @@ class StateCPDPTW(NamedTuple):
             arrive_j = T[:, :, None] + t_prev_to_j                     # [B,Np1,N]
             begin_j  = torch.maximum(arrive_j, a_j)                    # [B,Np1,N]
             feas_j   = (begin_j <= b_j) & S                            # must be open and time-feasible
+            # print('Feas J: ', feas_j, feas_j.shape)
             any_feas = feas_j.any(dim=-1)                              # [B,Np1]
+            # print('Any Feas: ', any_feas, any_feas.shape)
 
             # If a (b,v) has open deliveries but none feasible now -> deadlock for that (b,v)
             deadlock_now = has_open & (~any_feas)
+            # print('Deadlock Now: ', deadlock_now, deadlock_now.shape)
             if deadlock_now.any():
                 all_steps_feasible = all_steps_feasible & (~deadlock_now)
+                # print('all_steps_feasible after deadlock: ', _, all_steps_feasible, all_steps_feasible.shape)
                 # For these, we won't update T/prev/S anymore; just keep them marked infeasible.
                 # To avoid updating them below, mask their feas_j to all False:
                 feas_j = torch.where(deadlock_now[:, :, None], torch.zeros_like(feas_j), feas_j)
@@ -505,6 +520,7 @@ class StateCPDPTW(NamedTuple):
         # print('a0 shape: ', a0.shape, a0[:, None].shape)
         begin_0  = torch.maximum(arrive_0, a0)                                  # [B,Np1]
         # print(begin_0.shape, b0.shape)
+        # print('begin 0: ', begin_0, begin_0.shape)
         # print('begin_0<=b0: ', (begin_0<=b0), begin_0.shape)
         # print('all steps feasible: ', all_steps_feasible, all_steps_feasible.shape)
         depot_ok_exact = (begin_0 <= b0) & all_steps_feasible                   # [B,Np1]
@@ -537,31 +553,28 @@ class CPDPTW(object):
 
     @staticmethod
     def get_costs(dataset, pi):
-        batch_size, graph_size = dataset['demand'].size()
-
-        sorted_pi = pi.data.sort(1)[0]
-
-        demand_with_depot = torch.cat(
-            (
-                torch.full_like(dataset['demand'][:, :1], 0),
-                dataset['demand'][:, 1:]
-            ), dim = 1
-        )
-        d = demand_with_depot.gather(1, pi)
-
-        used_cap = torch.zeros_like(dataset['demand'][:, 0])
-        for i in range (pi.size(1)):
-            used_cap += d[:, i]
-            used_cap[used_cap < 0] = 0
-
-        loc_with_depot = torch.cat((dataset['coords'][:, :1], dataset['coords'][:, 1:]), dim=1)
-        d = loc_with_depot.gather(1, pi[..., None].expand(*pi.size(), loc_with_depot.size(-1)))
-
-        return (
-            (d[:, 1:] - d[:, :-1]).norm(p=2, dim=2).sum(1)
-            + (d[:, 0] - dataset['coords'][:, 0]).norm(p=2, dim=1)
-            + (d[:, -1] - dataset['coords'][:, 0]).norm(p=2, dim=1)
-        ), None
+        """
+        Compute total route time cost given a precomputed time matrix.
+        dataset: dict containing
+            - 'tmat': [B, N, N] travel time matrix
+            - 'demand', 'coords' (optional, unused)
+        pi: [B, N] route permutation tensor
+        """
+        B, N = pi.size()
+        tmat = dataset['tmat']  # [B, N, N]
+    
+        # Time from depot -> first node
+        t_depot_start = tmat[torch.arange(B), 0, pi[:, 0]]
+    
+        # Time between consecutive nodes
+        t_between = tmat[torch.arange(B)[:, None], pi[:, :-1], pi[:, 1:]]  # shape [B, N-1]
+        t_between = t_between.sum(1)
+    
+        # Time from last node -> depot
+        t_end_depot = tmat[torch.arange(B), pi[:, -1], 0]
+    
+        total_time = t_depot_start + t_between + t_end_depot
+        return total_time, None
     
     @staticmethod
     def make_dataset(*args, **kwargs):

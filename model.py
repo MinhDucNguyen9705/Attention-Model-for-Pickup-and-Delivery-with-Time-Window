@@ -248,9 +248,9 @@ class AttentionModel(nn.Module):
         self.problem = problem
 
         step_context_dim = embed_dim + 1
-        node_dim = 3
+        node_dim = 6
 
-        self.init_embed_depot = nn.Linear(2, embed_dim)
+        self.init_embed_depot = nn.Linear(3, embed_dim)
         self.init_embed = nn.Linear(node_dim, embed_dim)
 
         self.embedder = GraphAttentionEncoder(
@@ -302,11 +302,19 @@ class AttentionModel(nn.Module):
 
         return torch.cat(
             (
-                self.init_embed_depot(input['coords'][:, :1, 0:2]),
+                self.init_embed_depot(torch.cat(
+                    (
+                        input['coords'][:, :1, 0:2],
+                        input['tw'][:, :1, 1:]
+                    ),
+                    dim=-1
+                )),
                 self.init_embed(torch.cat(
                     (
                         input['coords'][:, 1:, :],
                         input['demand'][:, 1:, None],
+                        input['tw'][:, 1:, :],
+                        input['service'][:, 1:, None]
                     ),
                     dim=-1
                 ))
