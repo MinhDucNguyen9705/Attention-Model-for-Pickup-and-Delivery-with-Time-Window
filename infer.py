@@ -65,6 +65,7 @@ if __name__ == "__main__":
     if opts.model_path is not None:
         state_dict = torch.load(opts.model_path, map_location=opts.device, weights_only=False)
         model.load_state_dict(state_dict['model'])
+        print(f"Checkpoint loaded successfully")
 
     # Run the model
     model.eval()
@@ -85,11 +86,14 @@ if __name__ == "__main__":
         # print(validate_file(file_paths[i], convert_solution(tours[i])))
         results, inst = validate_file(file_paths[i], convert_solution(tours[i]))
         file_name, result, message, routes, cost, mean_percent_capacity, std_percent_capacity, mean_wait, std_wait, _ = results
-        log_results(results, opts.output_path)
-        log_to_excel(results, file_paths[i], opts.output_dir)
-        data.append([file_name.split('.')[0], routes, cost, round(mean_percent_capacity*100, 2), round(std_percent_capacity*100, 2), round(mean_wait, 2), round(std_wait, 2)])
-        total_cost += cost
-        total_routes += routes
+        if not result:
+            print(f"Validation failed for {file_name}: {message}")
+        else:
+            log_results(results, opts.output_path)
+            log_to_excel(results, file_paths[i], opts.output_dir)
+            data.append([file_name.split('.')[0], routes, cost, round(mean_percent_capacity*100, 2), round(std_percent_capacity*100, 2), round(mean_wait, 2), round(std_wait, 2)])
+            total_cost += cost
+            total_routes += routes
 
     with open(opts.output_path, 'a') as f:
         f.write(f'Total cost: {total_cost}\n')
