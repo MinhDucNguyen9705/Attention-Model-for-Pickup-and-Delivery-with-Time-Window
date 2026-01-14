@@ -65,13 +65,10 @@ def clip_grad_norms(param_groups, max_norm=math.inf):
     grad_norms_clipped = [min(g_norm, max_norm) for g_norm in grad_norms] if max_norm > 0 else grad_norms
     return grad_norms, grad_norms_clipped
 
-def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, problem, tb_logger, opts):
+def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, problem, opts):
     print("Start train epoch {}, lr={} for run {}".format(epoch, optimizer.param_groups[0]['lr'], opts.run_name))
     step = epoch * (opts.epoch_size // opts.batch_size)
     start_time = time.time()
-
-    if not opts.no_tensorboard:
-        tb_logger.log_value('learnrate_pg0', optimizer.param_groups[0]['lr'], step)
 
     # Generate new training data for each epoch
     training_dataset = baseline.wrap_dataset(problem.make_dataset(opts.data_path))
@@ -90,7 +87,6 @@ def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, pr
             batch_id,
             step,
             batch,
-            tb_logger,
             opts
         )
 
@@ -114,16 +110,13 @@ def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, pr
 
     avg_reward = validate(model, val_dataset, opts)
 
-    if not opts.no_tensorboard:
-        tb_logger.log_value('val_avg_reward', avg_reward, step)
-
     baseline.epoch_callback(model, epoch)
 
     # lr_scheduler should be called at end of epoch
     lr_scheduler.step()
 
 def log_values(cost, grad_norms, epoch, batch_id, step,
-               log_likelihood, reinforce_loss, bl_loss, tb_logger, opts):
+               log_likelihood, reinforce_loss, bl_loss, opts):
     avg_cost = cost.mean().item()
     grad_norms, grad_norms_clipped = grad_norms
 
@@ -131,21 +124,6 @@ def log_values(cost, grad_norms, epoch, batch_id, step,
     print('epoch: {}, train_batch_id: {}, avg_cost: {}'.format(epoch, batch_id, avg_cost))
 
     print('grad_norm: {}, clipped: {}'.format(grad_norms[0], grad_norms_clipped[0]))
-
-    # Log values to tensorboard
-    if not opts.no_tensorboard:
-        tb_logger.log_value('avg_cost', avg_cost, step)
-
-        tb_logger.log_value('actor_loss', reinforce_loss.item(), step)
-        tb_logger.log_value('nll', -log_likelihood.mean().item(), step)
-
-        tb_logger.log_value('grad_norm', grad_norms[0], step)
-        tb_logger.log_value('grad_norm_clipped', grad_norms_clipped[0], step)
-
-        if opts.baseline == 'critic':
-            tb_logger.log_value('critic_loss', bl_loss.item(), step)
-            tb_logger.log_value('critic_grad_norm', grad_norms[1], step)
-            tb_logger.log_value('critic_grad_norm_clipped', grad_norms_clipped[1], step)
 
 
 def train_batch(
@@ -156,7 +134,6 @@ def train_batch(
         batch_id,
         step,
         batch,
-        tb_logger,
         opts
 ):
     x, bl_val = baseline.unwrap_batch(batch)
@@ -183,4 +160,4 @@ def train_batch(
     # Logging
     if step % int(opts.log_step) == 0:
         log_values(cost, grad_norms, epoch, batch_id, step,
-                   log_likelihood, reinforce_loss, bl_loss, tb_logger, opts)
+                   log_likelihood, reinforce_loss, bl_loss, opts)

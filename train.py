@@ -1,6 +1,5 @@
 import argparse
 import os
-from tensorboard_logger import Logger as TbLogger
 import torch
 from model import AttentionModel
 from environment import CPDPTW
@@ -88,10 +87,6 @@ if __name__ == "__main__":
     )
     if not os.path.exists(opts.save_dir):
         os.makedirs(opts.save_dir)
-
-    tb_logger = None
-    if not opts.no_tensorboard:
-        tb_logger = TbLogger(os.path.join(opts.log_dir, "{}_{}".format(opts.problem, opts.graph_size), opts.run_name))
     
     opts.device = torch.device("cuda" if not opts.no_cuda and torch.cuda.is_available() else "cpu")
 
@@ -133,6 +128,5 @@ if __name__ == "__main__":
                 epoch,
                 val_dataset,
                 problem,
-                tb_logger,
                 opts
             )
